@@ -17,7 +17,7 @@ README 采用面向使用者的实用型结构：
 
 ## 脚本定位
 
-- `GetAllProjectItem.js`：遍历项目根目录下的指定素材箱，查找 `区界.wav`，并将其覆盖写入活动序列第一条音频轨道的 10 秒位置。
+- `GetAllProjectItem.js`：遍历项目根目录下的指定素材箱，查找 `区界.wav`，并将已验证代码中的硬编码数值 `10` 作为时间参数传给活动序列第一条音频轨道的 `overwriteClip`；文档只记录行为，不修改或重新解释代码。
 - `PrintBgmStartTime.js`：读取活动序列指定音频轨道中的所有剪辑，并在 ExtendScript 控制台打印名称和起始秒数；当前入口调用读取第二条音频轨道。
 - `PlaceMarkerSegments.js`：根据活动序列标记点生成时间段，按 `GLT_P0_<序号>_BASE` 与 `GLT_P0_<序号>_MASK` 命名查找唯一素材，并分别覆盖写入 V5、V6。
 
