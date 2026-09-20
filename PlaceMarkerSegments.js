@@ -106,7 +106,7 @@ function requireUniqueItem(itemMatches, name) {
     return matches[0];
 }
 
-function validateInputs(sequence, segments, itemMatches) {
+function validateInputs(sequence, segments, itemMatches, baseTrackIndex, maskTrackIndex, materialSuffix) {
     var baseItems = [];
     var maskItems = [];
     var index;
@@ -114,19 +114,28 @@ function validateInputs(sequence, segments, itemMatches) {
     if (!sequence) {
         throw new Error("No active sequence was found.");
     }
-    if (!sequence.videoTracks || !sequence.videoTracks[4]) {
-        throw new Error("V5 does not exist.");
+    if (typeof baseTrackIndex !== "number" || !isFinite(baseTrackIndex) ||
+            baseTrackIndex < 0 || Math.floor(baseTrackIndex) !== baseTrackIndex ||
+            typeof maskTrackIndex !== "number" || !isFinite(maskTrackIndex) ||
+            maskTrackIndex < 0 || Math.floor(maskTrackIndex) !== maskTrackIndex) {
+        throw new Error("BASE and MASK track indices must be non-negative integers.");
     }
-    if (!sequence.videoTracks[5]) {
-        throw new Error("V6 does not exist.");
+    if (baseTrackIndex === maskTrackIndex) {
+        throw new Error("BASE and MASK must use different video tracks.");
+    }
+    if (!sequence.videoTracks || !sequence.videoTracks[baseTrackIndex]) {
+        throw new Error("V" + (baseTrackIndex + 1) + " does not exist.");
+    }
+    if (!sequence.videoTracks[maskTrackIndex]) {
+        throw new Error("V" + (maskTrackIndex + 1) + " does not exist.");
     }
     if (!segments || segments.length === 0) {
         throw new Error("No valid marker segments were found.");
     }
 
     for (index = 0; index < segments.length; index++) {
-        baseItems.push(requireUniqueItem(itemMatches, "GLT_P0_" + index + "_BASE"));
-        maskItems.push(requireUniqueItem(itemMatches, "GLT_P0_" + index + "_MASK"));
+        baseItems.push(requireUniqueItem(itemMatches, "GLT_P0_" + index + "_BASE" + materialSuffix));
+        maskItems.push(requireUniqueItem(itemMatches, "GLT_P0_" + index + "_MASK" + materialSuffix));
     }
 
     return {
@@ -199,12 +208,12 @@ function placeSegment(track, projectItem, startTicks, endTicks) {
     return clip;
 }
 
-function wantedMaterialNames(segmentCount) {
+function wantedMaterialNames(segmentCount, materialSuffix) {
     var names = {};
     var index;
     for (index = 0; index < segmentCount; index++) {
-        names["GLT_P0_" + index + "_BASE"] = true;
-        names["GLT_P0_" + index + "_MASK"] = true;
+        names["GLT_P0_" + index + "_BASE" + materialSuffix] = true;
+        names["GLT_P0_" + index + "_MASK" + materialSuffix] = true;
     }
     return names;
 }
@@ -218,25 +227,45 @@ function placementError(error, groupIndex, projectItem, segment) {
     );
 }
 
-function runWithProject(project) {
+function runWithProject(project, baseTrackNumber, maskTrackNumber, mode) {
     var sequence;
     var segments;
     var itemMatches = {};
     var validated;
     var index;
+    var baseTrackIndex;
+    var maskTrackIndex;
+    var materialSuffix;
+
+    if (typeof mode === "undefined") {
+        mode = "light";
+    }
+    if (mode !== "light" && mode !== "dark") {
+        throw new Error('Mode must be "light" or "dark".');
+    }
+    materialSuffix = mode === "dark" ? "_d" : "";
+
+    if (typeof baseTrackNumber !== "number" || !isFinite(baseTrackNumber) ||
+            baseTrackNumber < 1 || Math.floor(baseTrackNumber) !== baseTrackNumber ||
+            typeof maskTrackNumber !== "number" || !isFinite(maskTrackNumber) ||
+            maskTrackNumber < 1 || Math.floor(maskTrackNumber) !== maskTrackNumber) {
+        throw new Error("BASE and MASK video track numbers must be positive integers (V1 = 1).");
+    }
+    baseTrackIndex = baseTrackNumber - 1;
+    maskTrackIndex = maskTrackNumber - 1;
 
     if (!project || !project.activeSequence) {
         throw new Error("No active sequence was found.");
     }
     sequence = project.activeSequence;
     segments = buildSegments(readMarkerTicks(sequence));
-    collectNamedItems(project.rootItem, wantedMaterialNames(segments.length), itemMatches);
-    validated = validateInputs(sequence, segments, itemMatches);
+    collectNamedItems(project.rootItem, wantedMaterialNames(segments.length, materialSuffix), itemMatches);
+    validated = validateInputs(sequence, segments, itemMatches, baseTrackIndex, maskTrackIndex, materialSuffix);
 
     for (index = 0; index < segments.length; index++) {
         try {
             placeSegment(
-                sequence.videoTracks[4],
+                sequence.videoTracks[baseTrackIndex],
                 validated.baseItems[index],
                 segments[index].startTicks,
                 segments[index].endTicks
@@ -247,7 +276,7 @@ function runWithProject(project) {
 
         try {
             placeSegment(
-                sequence.videoTracks[5],
+                sequence.videoTracks[maskTrackIndex],
                 validated.maskItems[index],
                 segments[index].startTicks,
                 segments[index].endTicks
@@ -260,14 +289,16 @@ function runWithProject(project) {
     return segments.length;
 }
 
-function run() {
+function run(baseTrackNumber, maskTrackNumber, mode) {
     var placedCount;
     try {
-        placedCount = runWithProject(app.project);
+        placedCount = runWithProject(app.project, baseTrackNumber, maskTrackNumber, mode);
         alert("成功放置 " + placedCount + " 组 BASE/MASK 素材。");
     } catch (error) {
         alert("放置失败：\n" + error.message);
     }
 }
 
-run();
+// Video track numbers: BASE on V5, MASK on V6.
+// Mode: "light" for original names, "dark" for names ending in _d.
+run(5, 6, "light");
