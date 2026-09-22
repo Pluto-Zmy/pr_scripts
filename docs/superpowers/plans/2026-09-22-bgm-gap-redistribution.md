@@ -30,6 +30,15 @@ Markdown
    `TrackItem.inPoint/outPoint` 的 Time 对象、`clip.start.ticks` / `clip.end.ticks`。
 5. `ProbeBgmApi.js` 是诊断用临时脚本，未纳入提交。
 
+6. **落位栅格 = 序列帧格（关键修正）。** 第一次写入跑到第 7 条时中止：`落位偏差 248724000 ticks`。
+   根因是 Premiere 把剪辑位置**吸附到序列帧格**（`sequence.timebase` = 4233600000 = 1/60 秒），
+   而原实现只把间隙对齐到音频采样栅格。验算吻合：请求点 344420045676000 不在帧格上，
+   最近的帧格边界 344420294400000 与之差正好 248724000。修法：`plan()` 新增 `placementGridTicks`
+   参数（由脚本读 `sequence.timebase` 传入），落位栅格取「采样栅格与帧格的最小公倍数」，
+   间隙按整数格切分并把余数 Bresenham 式摊到各间隙上（本例 18 帧 × 3 + 19 帧 × 49，
+   相差 16.7 毫秒，末尾不留大窟窿）。预检也改为在**第一条要移动的剪辑的真实计划位置**上试落位
+   —— 原来挑"窗口末尾 + 60 秒"恰好落在帧格上，给了假的好结果。
+
 ## Global Constraints
 
 - 设计依据：`docs/superpowers/specs/2026-09-22-bgm-gap-redistribution-design.md`。

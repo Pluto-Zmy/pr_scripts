@@ -51,15 +51,22 @@ test('采样栅格由源轨时间点反推为 1/48000 秒', () => {
     assert.strictEqual(planner.inferGrid(clips).ticks, '5292000');
 });
 
-test('真实 A2 快照的重排计划与离线独立计算结果一致', () => {
-    const result = planner.plan(clips, 6, 1);
+test('真实 A2 快照 + 序列帧格的重排计划与离线独立实现一致', () => {
+    const result = planner.plan(clips, 6, 1, '4233600000');
     assert.strictEqual(result.ok, true, result.error);
 
     assert.strictEqual(result.entries.length, 58);
     assert.strictEqual(result.movedCount, 51);
     assert.strictEqual(result.ngaps, 52);
-    assert.strictEqual(result.grid.ticks, '5292000');
-    assert.strictEqual(result.gap, '80189676000');           // 0.3156875 秒 = 15153 个采样
+    assert.strictEqual(result.sampleGrid.ticks, '5292000');
+    // 落位栅格 = 采样栅格与帧格的最小公倍数；帧格是采样栅格的 800 倍
+    assert.strictEqual(result.grid.ticks, '4233600000');
+    assert.strictEqual(result.grid.label, '1/60 秒');
+
+    // 985 帧空隙分给 52 个间隙：18 帧 x 3 个 + 19 帧 x 49 个
+    assert.strictEqual(result.gap, '76204800000');           // 18 帧 = 0.3000 秒
+    assert.strictEqual(result.gapMax, '80438400000');        // 19 帧 = 0.3167 秒
+    assert.strictEqual(result.extraGaps, 49);
 
     // 前 6 首原地不动
     for (let i = 0; i < 6; i++) {
@@ -73,21 +80,32 @@ test('真实 A2 快照的重排计划与离线独立计算结果一致', () => {
     assert.strictEqual(result.entries[57].moved, false);
 
     // 抽样核对离线独立算出的新起点
-    assert.strictEqual(result.entries[6].start, '344420045676000');    // 第 7 首
-    assert.strictEqual(result.entries[15].start, '875810811960000');   // 第 16 首，位移最大 −12.293 秒
-    assert.strictEqual(result.entries[56].start, '3161254537476000');  // 第 57 首
+    assert.strictEqual(result.entries[6].start, '344416060800000');    // 第 7 首
+    assert.strictEqual(result.entries[15].start, '875809065600000');   // 第 16 首，位移最大 −12.300 秒
+    assert.strictEqual(result.entries[56].start, '3161254521600000');  // 第 57 首
 
-    // 第 6 首与最后一首之间：除最后一个间隙外全部等于 gap
-    for (let i = 6; i <= 56; i++) {
-        assert.strictEqual(
-            planner.sub(result.entries[i].start, result.entries[i - 1].end),
-            result.gap,
-            '第 ' + i + ' 个间隙不等于 gap'
-        );
+    // 所有时间点必须落在落位栅格上：否则 Premiere 会吸附，实测间隙就不等了
+    for (let i = 0; i < result.entries.length; i++) {
+        assert.strictEqual(planner.divSmall(result.entries[i].start, 4233600000).r, 0,
+            '第 ' + (i + 1) + ' 首起点不在落位栅格上');
+        assert.strictEqual(planner.divSmall(result.entries[i].end, 4233600000).r, 0,
+            '第 ' + (i + 1) + ' 首终点不在落位栅格上');
     }
-    // 最后一个间隙吸收取整余数 = gap + 44 个采样
-    assert.strictEqual(planner.sub(result.entries[57].start, result.entries[56].end), '80422524000');
-    assert.strictEqual(planner.add(result.gap, planner.mulSmall('5292000', 44)), '80422524000');
+
+    // 间隙只能是 18 或 19 帧。显式间隙 51 个（最后一个间隙由固定端点决定，不在 gaps 里）：
+    // 摊出去 48 个「多一格」，剩下 1 格和不足一格的零头落在最后一个间隙上。
+    assert.strictEqual(result.gaps.length, 51);
+    assert.strictEqual(result.distributedExtras, 48);
+    let maxCount = 0;
+    for (let i = 0; i < result.gaps.length; i++) {
+        const g = result.gaps[i];
+        assert.ok(g === result.gap || g === result.gapMax,
+            '第 ' + (i + 1) + ' 个间隙 = ' + g + ' 不在 {18 帧, 19 帧} 内');
+        if (g === result.gapMax) maxCount++;
+    }
+    assert.strictEqual(maxCount, 48);
+    // 最后一个间隙 = 18 帧 + 剩的 1 格 + 零头，所以是 19 帧（不会留下大窟窿）
+    assert.strictEqual(planner.sub(result.entries[57].start, result.entries[56].end), result.gapMax);
 
     // 不重叠
     for (let i = 1; i < result.entries.length; i++) {
@@ -95,14 +113,31 @@ test('真实 A2 快照的重排计划与离线独立计算结果一致', () => {
     }
 });
 
+test('没有落位栅格或源轨时间点不对齐时拒绝出计划', () => {
+    const missing = planner.plan(clips, 6, 1);
+    assert.strictEqual(missing.ok, false);
+    assert.match(missing.error, /落位栅格无效/);
+
+    const zero = planner.plan(clips, 6, 1, '0');
+    assert.strictEqual(zero.ok, false);
+    assert.match(zero.error, /落位栅格无效/);
+
+    // 把某条起点挪 1 tick，它就不在落位栅格上了 —— 必须拒绝，而不是悄悄被 Premiere 吸附
+    const shifted = clips.map((clip) => Object.assign({}, clip));
+    shifted[10].start = planner.add(shifted[10].start, '1');
+    const misaligned = planner.plan(shifted, 6, 1, '4233600000');
+    assert.strictEqual(misaligned.ok, false);
+    assert.match(misaligned.error, /不在落位栅格上/);
+});
+
 test('剪辑数量不足或时间重叠时拒绝出计划', () => {
-    const tooFew = planner.plan(clips.slice(0, 3), 6, 1);
+    const tooFew = planner.plan(clips.slice(0, 3), 6, 1, '4233600000');
     assert.strictEqual(tooFew.ok, false);
     assert.match(tooFew.error, /数量不足/);
 
     const duplicated = clips.slice(0, 8).map((clip) => Object.assign({}, clip));
     duplicated[7].start = duplicated[6].start;
-    const overlapping = planner.plan(duplicated, 6, 1);
+    const overlapping = planner.plan(duplicated, 6, 1, '4233600000');
     assert.strictEqual(overlapping.ok, false);
     assert.match(overlapping.error, /重叠/);
 });

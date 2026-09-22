@@ -109,6 +109,32 @@ var BgmGapPlanner = (function () {
         return Number(digits(value)) / TICKS_PER_SECOND;
     }
 
+    function gcdNumber(a, b) {
+        var swap;
+        while (b > 0) {
+            swap = a % b;
+            a = b;
+            b = swap;
+        }
+        return a;
+    }
+
+    // 落位栅格 = 采样栅格与序列帧格的最小公倍数。
+    // Premiere 会把剪辑位置吸附到序列帧格（timebase）上：本机实测，请求点不在帧格上时
+    // 被吸附了 248724000 ticks。因此间隙必须对齐帧格，否则实测间隙会互相差最多一帧。
+    function combineGrid(sampleGridTicks, placementGridTicks) {
+        var sample = Number(sampleGridTicks), placement = Number(placementGridTicks);
+        var ticks;
+        if (!isFinite(placement) || placement <= 0 || Math.floor(placement) !== placement) {
+            throw new Error("落位栅格无效：" + placementGridTicks);
+        }
+        ticks = mulSmall(String(placement), sample / gcdNumber(sample, placement));
+        return {
+            ticks: ticks,
+            label: "1/" + Math.round(TICKS_PER_SECOND / Number(ticks)) + " 秒"
+        };
+    }
+
     function inferGrid(clips) {
         var i, j, candidate, ok;
         for (i = 0; i < GRID_CANDIDATES.length; i++) {
@@ -135,10 +161,13 @@ var BgmGapPlanner = (function () {
     }
 
     // keepHead：开头保持不动的首数；keepTail：结尾保持不动的首数。两者都必须 >= 1。
-    function plan(clips, keepHead, keepTail) {
-        var sorted, grid, durs = [], sumDuration = "0", ngaps, gap, entries = [];
+    // placementGridTicks：序列的 timebase（帧格，单位 ticks）。Premiere 会把剪辑位置
+    // 吸附到这个栅格上，所以间隙必须对齐它，否则实测间隙会互相差最多一帧。
+    function plan(clips, keepHead, keepTail, placementGridTicks) {
+        var sorted, sampleGrid, grid, gridNumber, durs = [], sumDuration = "0", ngaps;
         var windowStart, windowEnd, available, cursor, start, end, movedCount = 0;
-        var quotient, actualGap, finalGap, bound, i;
+        var frames, baseFrames, gapBase, gapMax, extraFrames, gaps = [], gap, extra, k;
+        var entries = [], gapMaxCount = 0, distributedExtras, actualGap, finalGap, finalGapFloor, i;
 
         if (!clips || !clips.length) {
             return { ok: false, error: "源轨上没有剪辑。" };
@@ -150,6 +179,11 @@ var BgmGapPlanner = (function () {
             return { ok: false, error: "剪辑数量不足：前 " + keepHead + " 首与后 " + keepTail +
                 " 首固定，中间至少要 1 首，当前共 " + clips.length + " 条。" };
         }
+        if (!placementGridTicks || !/^\d+$/.test(String(placementGridTicks)) ||
+                Number(placementGridTicks) <= 0) {
+            return { ok: false, error: "落位栅格无效：" + placementGridTicks +
+                "（应为序列的 timebase，单位 ticks 的正整数）。" };
+        }
 
         sorted = sortByStart(clips);
         for (i = 1; i < sorted.length; i++) {
@@ -159,7 +193,21 @@ var BgmGapPlanner = (function () {
             }
         }
 
-        grid = inferGrid(sorted);
+        sampleGrid = inferGrid(sorted);
+        try {
+            grid = combineGrid(sampleGrid.ticks, placementGridTicks);
+        } catch (gridError) {
+            return { ok: false, error: gridError.message };
+        }
+        gridNumber = Number(grid.ticks);
+        for (i = 0; i < sorted.length; i++) {
+            if (divSmall(sorted[i].start, gridNumber).r !== 0 ||
+                    divSmall(sorted[i].end, gridNumber).r !== 0) {
+                return { ok: false, error: "源轨第 " + (i + 1) +
+                    " 条的时间点不在落位栅格上（" + grid.ticks +
+                    " ticks），重排后无法保证间隙严格一致。" };
+            }
+        }
         for (i = keepHead; i <= sorted.length - keepTail - 1; i++) {
             durs.push(sub(sorted[i].end, sorted[i].start));
             sumDuration = add(sumDuration, durs[durs.length - 1]);
@@ -176,18 +224,32 @@ var BgmGapPlanner = (function () {
         if (cmp(available, "0") <= 0) {
             return { ok: false, error: "中间各首已填满固定窗口，没有可分配的空隙。" };
         }
-        quotient = divSmall(available, ngaps).q;
-        gap = mulSmall(divSmall(quotient, Number(grid.ticks)).q, Number(grid.ticks));
-        if (cmp(gap, "0") <= 0) {
-            return { ok: false, error: "可用空隙不足一个采样栅格（" + grid.label + "），无法均分。" };
+        // 空隙先切成整数个落位栅格单位，除不尽的余数摊到各个间隙上（每个多一格），
+        // 避免把几十帧的零头全堆在最后一个间隙里。
+        frames = divSmall(available, gridNumber).q;
+        baseFrames = divSmall(frames, ngaps).q;
+        extraFrames = divSmall(frames, ngaps).r;
+        gapBase = mulSmall(baseFrames, gridNumber);
+        gapMax = add(gapBase, grid.ticks);
+        // 前 ngaps-1 个间隙是显式的；最后一个间隙（最后一首之前）由固定端点决定，
+        // 它吸收没摊出去的那几格和不足一格的零头。
+        distributedExtras = Math.floor((ngaps - 1) * extraFrames / ngaps);
+        if (cmp(frames, "1") < 0) {
+            return { ok: false, error: "可用空隙不足一个落位栅格（" + grid.ticks + " ticks），无法均分。" };
         }
 
         cursor = windowStart;
         for (i = 0; i < sorted.length; i++) {
             if (i >= keepHead && i <= sorted.length - keepTail - 1) {
+                k = i - keepHead;
+                // 把「多一格」的间隙均匀摊开：前 k+1 个间隙里该有几个是多一格的
+                extra = Math.floor((k + 1) * extraFrames / ngaps) -
+                    Math.floor(k * extraFrames / ngaps);
+                gap = mulSmall(String(Number(baseFrames) + extra), gridNumber);
+                gaps.push(gap);
                 cursor = add(cursor, gap);
                 start = cursor;
-                end = add(start, durs[i - keepHead]);
+                end = add(start, durs[k]);
                 cursor = end;
                 movedCount++;
             } else {
@@ -204,33 +266,53 @@ var BgmGapPlanner = (function () {
             });
         }
 
-        // 自检：不得重叠
-        for (i = 1; i < entries.length; i++) {
-            if (cmp(entries[i].start, entries[i - 1].end) < 0) {
+        // 自检：所有时间点都在落位栅格上，且不得重叠
+        for (i = 0; i < entries.length; i++) {
+            if (divSmall(entries[i].start, gridNumber).r !== 0 ||
+                    divSmall(entries[i].end, gridNumber).r !== 0) {
+                return { ok: false, error: "自检失败：重排后第 " + (i + 1) +
+                    " 条的时间点不在落位栅格上。" };
+            }
+            if (i && cmp(entries[i].start, entries[i - 1].end) < 0) {
                 return { ok: false, error: "自检失败：重排后第 " + (i + 1) + " 条与前一条重叠。" };
             }
         }
-        // 自检：第 keepHead 首与最后一首之间，除最后一个间隙外全部等于 gap
-        for (i = keepHead; i <= entries.length - 1 - keepTail; i++) {
-            actualGap = sub(entries[i].start, entries[i - 1].end);
-            if (cmp(actualGap, gap) !== 0) {
-                return { ok: false, error: "自检失败：第 " + i + " 个间隙为 " +
-                    seconds(actualGap) + " 秒，不等于 " + seconds(gap) + " 秒。" };
+        // 自检：每个显式间隙只能是「基础格数」或「多一格」，且多一格的个数等于摊出去的数量
+        for (i = 0; i < gaps.length; i++) {
+            if (cmp(gaps[i], gapBase) !== 0 && cmp(gaps[i], gapMax) !== 0) {
+                return { ok: false, error: "自检失败：第 " + (i + 1) + " 个间隙为 " +
+                    seconds(gaps[i]) + " 秒，不在 {" + seconds(gapBase) + ", " +
+                    seconds(gapMax) + "} 秒内。" };
+            }
+            if (cmp(gaps[i], gapMax) === 0) {
+                gapMaxCount++;
             }
         }
-        // 自检：最后一个间隙吸收取整余数，不得超过 ngaps 个栅格
+        if (gapMaxCount !== distributedExtras) {
+            return { ok: false, error: "自检失败：多一格的显式间隙有 " + gapMaxCount +
+                " 个，应为 " + distributedExtras + " 个。" };
+        }
+        // 自检：最后一个间隙 = 基础格数 + 没摊出去的那几格 + 不足一格的零头
         finalGap = sub(entries[entries.length - 1].start, entries[entries.length - 2].end);
-        bound = add(gap, mulSmall(grid.ticks, ngaps));
-        if (cmp(finalGap, gap) < 0 || cmp(finalGap, bound) > 0) {
+        finalGapFloor = add(gapBase,
+            mulSmall(String(extraFrames - distributedExtras), grid.ticks));
+        if (cmp(finalGap, finalGapFloor) < 0 ||
+                cmp(finalGap, add(finalGapFloor, grid.ticks)) > 0) {
             return { ok: false, error: "自检失败：最后一个间隙 " + seconds(finalGap) +
-                " 秒超出 [" + seconds(gap) + ", " + seconds(bound) + "] 秒。" };
+                " 秒超出 [" + seconds(finalGapFloor) + ", " +
+                seconds(add(finalGapFloor, grid.ticks)) + ") 秒的范围。" };
         }
 
         return {
             ok: true,
             entries: entries,
-            gap: gap,
+            gaps: gaps,
+            gap: gapBase,
+            gapMax: gapMax,
+            extraGaps: extraFrames,
+            distributedExtras: distributedExtras,
             grid: grid,
+            sampleGrid: sampleGrid,
             ngaps: ngaps,
             movedCount: movedCount,
             windowStart: windowStart,
@@ -369,9 +451,14 @@ function summarize(result, config, sourceClips, target) {
         result.movedCount + " 首重排）");
     lines.push("目标轨 A" + config.targetTrack + "：" +
         (target ? count(target.clips) + " 条（写入前会清空）" : "不存在"));
-    lines.push("采样栅格：" + result.grid.label + "（" + result.grid.ticks + " ticks）");
-    lines.push("统一间隙：" + BgmGapPlanner.seconds(result.gap).toFixed(6) + " 秒（" +
-        BgmGapPlanner.divSmall(result.gap, Number(result.grid.ticks)).q + " 个采样）");
+    lines.push("采样栅格：" + result.sampleGrid.label + "（" + result.sampleGrid.ticks + " ticks）");
+    lines.push("落位栅格：" + result.grid.label + "（" + result.grid.ticks +
+        " ticks = 序列 timebase；Premiere 会把剪辑位置吸附到这里）");
+    lines.push("间隙：" + BgmGapPlanner.seconds(result.gap).toFixed(4) + " 秒（" +
+        BgmGapPlanner.divSmall(result.gap, Number(result.grid.ticks)).q + " 帧）～ " +
+        BgmGapPlanner.seconds(result.gapMax).toFixed(4) + " 秒（" +
+        BgmGapPlanner.divSmall(result.gapMax, Number(result.grid.ticks)).q + " 帧）｜共 " +
+        result.ngaps + " 个间隙，其中 " + result.extraGaps + " 个取大的那档");
     lines.push("固定窗口：" + BgmGapPlanner.seconds(result.windowStart).toFixed(3) + " 秒 ～ " +
         BgmGapPlanner.seconds(result.windowEnd).toFixed(3) + " 秒");
     lines.push("最大位移：" + maxShiftText(result.entries));
@@ -410,8 +497,9 @@ function findPlaced(track, item, startTicks) {
     return best;
 }
 
-// 落位预检：在窗口末尾之后 60 秒放一条测试剪辑，确认 Premiere 严格按给定 tick 落位，
-// 然后立即删掉。这是写入前唯一能验证 overwriteClip 落位精度的办法。
+// 落位预检：在「第一条要移动的剪辑的真实计划位置」上放一条测试剪辑，确认 Premiere
+// 严格按给定 tick 落位，然后立即删掉。用真实计划位置而不是随便找个空位 ——
+// 随便找的位置可能恰好落在栅格上，会给出假的好结果（本机就是这么漏过一次）。
 function preflight(target, result) {
     var entry = null, i, item, oldIn, oldOut, probeTicks, clip = null, delta;
     for (i = 0; i < result.entries.length && !entry; i++) {
@@ -426,9 +514,10 @@ function preflight(target, result) {
     if (!item) {
         throw new Error("预检失败：第 " + entry.index + " 条没有素材引用。");
     }
-    probeTicks = BgmGapPlanner.add(result.windowEnd, "15240960000000");   // 60 秒
-    $.writeln("预检参数：inSeconds=" + entry.source.inSeconds + " outSeconds=" +
-        entry.source.outSeconds + " probeTicks=" + probeTicks);
+    probeTicks = entry.start;
+    $.writeln("预检参数：位置=" + probeTicks + "（" +
+        BgmGapPlanner.seconds(probeTicks).toFixed(4) + " 秒）inSeconds=" +
+        entry.source.inSeconds + " outSeconds=" + entry.source.outSeconds);
     oldIn = attempt("预检·读素材 in 点", function () { return item.getInPoint(AUDIO_MEDIA_TYPE); });
     oldOut = attempt("预检·读素材 out 点", function () { return item.getOutPoint(AUDIO_MEDIA_TYPE); });
     try {
@@ -446,11 +535,13 @@ function preflight(target, result) {
             throw new Error("预检失败：目标轨上没有出现测试剪辑。");
         }
         delta = Math.abs(Number(clip.start.ticks) - Number(probeTicks));
-        if (delta > Number(result.grid.ticks) * 2) {
-            throw new Error("预检失败：请求落位 " + BgmGapPlanner.seconds(probeTicks).toFixed(3) +
-                " 秒，实际 " + BgmGapPlanner.seconds(ticksOf(clip.start.ticks)).toFixed(3) +
-                " 秒，偏差 " + delta + " ticks（超过 2 个采样）。\n" +
-                "说明 Premiere 不会严格按给定 tick 落位，需要先调整写入策略；本次未写入任何正式剪辑。");
+        if (delta > Number(result.sampleGrid.ticks) * 2) {
+            throw new Error("预检失败：请求落位 " + BgmGapPlanner.seconds(probeTicks).toFixed(4) +
+                " 秒，实际 " + BgmGapPlanner.seconds(ticksOf(clip.start.ticks)).toFixed(4) +
+                " 秒，偏差 " + delta + " ticks（" +
+                (delta / Number(result.grid.ticks)).toFixed(2) +
+                " 帧）。\n说明 Premiere 不会严格按给定 tick 落位，需要先调整写入策略；" +
+                "本次未写入任何正式剪辑。");
         }
         return delta;
     } finally {
@@ -508,8 +599,9 @@ function writeTarget(track, result) {
                 throw new Error("Premiere 没有在预期位置创建剪辑");
             }
             delta = Math.abs(Number(clip.start.ticks) - Number(entry.start));
-            if (delta > Number(result.grid.ticks) * 2) {
-                throw new Error("落位偏差 " + delta + " ticks，超过 2 个采样");
+            if (delta > Number(result.sampleGrid.ticks) * 2) {
+                throw new Error("落位偏差 " + delta + " ticks（" +
+                    (delta / Number(result.grid.ticks)).toFixed(2) + " 帧），超过 2 个采样");
             }
             if (BgmGapPlanner.cmp(ticksOf(clip.end.ticks), entry.end) !== 0) {
                 attempt("写入·第 " + entry.index + " 条校正结束点", function () {
@@ -543,7 +635,7 @@ function writeTarget(track, result) {
 
 function verifyTarget(track, result, config) {
     var actual = readTrack(track), planned = result.entries;
-    var i, gap, deviation, maxDeviation = 0, finalGap, bound;
+    var i, gap, gapMaxCount = 0, deviation, maxDeviation = 0, finalGap, floor, bound;
     if (actual.length !== planned.length) {
         throw new Error("复读校验失败：目标轨有 " + actual.length + " 条，计划 " +
             planned.length + " 条。");
@@ -567,35 +659,49 @@ function verifyTarget(track, result, config) {
             }
         }
     }
-    // 第 keepHead 首与最后一首之间：除最后一个间隙外全部等于 gap
+    // 第 keepHead 首与最后一首之间：每个间隙只能是「基础格数」或「多一格」
     for (i = config.keepHead; i <= actual.length - 1 - config.keepTail; i++) {
         gap = BgmGapPlanner.sub(actual[i].start, actual[i - 1].end);
-        if (BgmGapPlanner.cmp(gap, result.gap) !== 0) {
+        if (BgmGapPlanner.cmp(gap, result.gap) !== 0 &&
+                BgmGapPlanner.cmp(gap, result.gapMax) !== 0) {
             throw new Error("复读校验失败：第 " + i + " 个间隙为 " +
-                BgmGapPlanner.seconds(gap).toFixed(6) + " 秒，应为 " +
-                BgmGapPlanner.seconds(result.gap).toFixed(6) + " 秒。");
+                BgmGapPlanner.seconds(gap).toFixed(4) + " 秒，不在 {" +
+                BgmGapPlanner.seconds(result.gap).toFixed(4) + ", " +
+                BgmGapPlanner.seconds(result.gapMax).toFixed(4) + "} 秒内。");
+        }
+        if (BgmGapPlanner.cmp(gap, result.gapMax) === 0) {
+            gapMaxCount++;
         }
     }
-    // 最后一个间隙吸收取整余数
+    if (gapMaxCount !== result.distributedExtras) {
+        throw new Error("复读校验失败：多一格的显式间隙有 " + gapMaxCount + " 个，应为 " +
+            result.distributedExtras + " 个。");
+    }
+    // 最后一个间隙 = 基础格数 + 没摊出去的那几格 + 不足一格的零头
     finalGap = BgmGapPlanner.sub(actual[actual.length - 1].start, actual[actual.length - 2].end);
-    bound = BgmGapPlanner.add(result.gap, BgmGapPlanner.mulSmall(result.grid.ticks, result.ngaps));
-    if (BgmGapPlanner.cmp(finalGap, result.gap) < 0 || BgmGapPlanner.cmp(finalGap, bound) > 0) {
+    floor = BgmGapPlanner.add(result.gap,
+        BgmGapPlanner.mulSmall(String(result.extraGaps - result.distributedExtras),
+            result.grid.ticks));
+    bound = BgmGapPlanner.add(floor, result.grid.ticks);
+    if (BgmGapPlanner.cmp(finalGap, floor) < 0 || BgmGapPlanner.cmp(finalGap, bound) > 0) {
         throw new Error("复读校验失败：最后一个间隙为 " +
-            BgmGapPlanner.seconds(finalGap).toFixed(6) + " 秒，超出允许范围 [" +
-            BgmGapPlanner.seconds(result.gap).toFixed(6) + ", " +
-            BgmGapPlanner.seconds(bound).toFixed(6) + "] 秒。");
+            BgmGapPlanner.seconds(finalGap).toFixed(4) + " 秒，超出允许范围 [" +
+            BgmGapPlanner.seconds(result.gap).toFixed(4) + ", " +
+            BgmGapPlanner.seconds(bound).toFixed(4) + "] 秒。");
     }
     $.writeln("\n复读校验通过：");
     $.writeln("  目标轨条数：" + actual.length);
-    $.writeln("  最后一个间隙比统一间隙多 " +
-        BgmGapPlanner.divSmall(BgmGapPlanner.sub(finalGap, result.gap),
-            Number(result.grid.ticks)).q + " 个采样");
+    $.writeln("  间隙：" + BgmGapPlanner.divSmall(result.gap, Number(result.grid.ticks)).q +
+        " 帧 ～ " + BgmGapPlanner.divSmall(result.gapMax, Number(result.grid.ticks)).q +
+        " 帧（多一格的 " + gapMaxCount + " 个）");
+    $.writeln("  最后一个间隙：" +
+        BgmGapPlanner.divSmall(finalGap, Number(result.grid.ticks)).q + " 帧");
     $.writeln("  最大落位偏差：" + maxDeviation + " ticks");
 }
 
 function execute(config) {
     var sequence = app.project && app.project.activeSequence;
-    var source, target, sourceClips, result, summary, cleared = 0;
+    var source, target, sourceClips, placementGrid, result, summary, cleared = 0;
 
     if (config.mode !== "report" && config.mode !== "write") {
         throw new Error('CONFIG.mode 只能是 "report" 或 "write"，当前是 ' + config.mode + "。");
@@ -613,7 +719,12 @@ function execute(config) {
     target = sequence.audioTracks[config.targetTrack - 1];
 
     sourceClips = readTrack(source);
-    result = BgmGapPlanner.plan(sourceClips, config.keepHead, config.keepTail);
+    // 序列的 timebase 就是 Premiere 吸附剪辑位置用的帧格，必须传给排期计算，
+    // 否则算出来的位置会被吸附、实测间隙差最多一帧（本机实测过）。
+    placementGrid = attempt("读取序列 timebase（落位栅格）", function () {
+        return String(sequence.timebase);
+    });
+    result = BgmGapPlanner.plan(sourceClips, config.keepHead, config.keepTail, placementGrid);
     if (!result.ok) {
         throw new Error(result.error);
     }
