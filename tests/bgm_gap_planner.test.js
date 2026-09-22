@@ -106,3 +106,10 @@ test('剪辑数量不足或时间重叠时拒绝出计划', () => {
     assert.strictEqual(overlapping.ok, false);
     assert.match(overlapping.error, /重叠/);
 });
+
+test('入口函数存在，且 Node 下求值不触发它', () => {
+    const sandbox = {};
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(SCRIPT, 'utf8'), sandbox, { filename: SCRIPT });
+    assert.strictEqual(typeof sandbox.runRedistributeBgmGaps, 'function');
+});

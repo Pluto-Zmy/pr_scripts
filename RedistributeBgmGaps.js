@@ -247,3 +247,164 @@ var BgmGapPlanner = (function () {
         seconds: seconds
     };
 }());
+
+// ==== 以下为 Premiere 胶水层 ====
+
+// ProjectItem.getInPoint / setInPoint 的 mediaType：2 = 仅音频（1 = 仅视频，4 = 全部）
+var AUDIO_MEDIA_TYPE = 2;
+
+function count(items) {
+    return typeof items.numItems !== "undefined" ? items.numItems : items.length;
+}
+
+function ticksOf(value) {
+    var text = String(value);
+    if (!/^\d+$/.test(text)) {
+        throw new Error("遇到无效或负数时间：" + text);
+    }
+    return text.replace(/^0+(?=\d)/, "");
+}
+
+function timeFromTicks(value) {
+    var stamp = new Time();
+    stamp.ticks = ticksOf(value);
+    return stamp;
+}
+
+function pad(value, width) {
+    var text = String(value);
+    while (text.length < width) {
+        text = " " + text;
+    }
+    return text;
+}
+
+function padRight(value, width) {
+    var text = String(value);
+    while (text.length < width) {
+        text = text + " ";
+    }
+    return text;
+}
+
+function readTrack(track) {
+    var clips = [], i, clip;
+    for (i = 0; i < count(track.clips); i++) {
+        clip = track.clips[i];
+        clips.push({
+            name: String(clip.name),
+            start: ticksOf(clip.start.ticks),
+            end: ticksOf(clip.end.ticks),
+            inSeconds: clip.inPoint.seconds,
+            outSeconds: clip.outPoint.seconds,
+            item: clip.projectItem
+        });
+    }
+    return clips;
+}
+
+function report(entries) {
+    var lines = ["序号  名称                          原 start      新 start       位移(秒)"];
+    var i, entry, oldStart, newStart;
+    for (i = 0; i < entries.length; i++) {
+        entry = entries[i];
+        oldStart = BgmGapPlanner.seconds(entry.source.start);
+        newStart = BgmGapPlanner.seconds(entry.start);
+        lines.push(pad(entry.index, 4) + "  " + padRight(entry.name, 28) +
+            pad(oldStart.toFixed(3), 13) + pad(newStart.toFixed(3), 14) +
+            pad(entry.moved ? (newStart - oldStart).toFixed(3) : "—", 10));
+    }
+    $.writeln(lines.join("\n"));
+}
+
+function maxShiftText(entries) {
+    var worst = null, worstShift = 0, i, entry, shift;
+    for (i = 0; i < entries.length; i++) {
+        entry = entries[i];
+        shift = BgmGapPlanner.seconds(entry.start) - BgmGapPlanner.seconds(entry.source.start);
+        if (Math.abs(shift) > Math.abs(worstShift)) {
+            worstShift = shift;
+            worst = entry;
+        }
+    }
+    if (!worst) {
+        return "无";
+    }
+    return "第 " + worst.index + " 首 " + (worstShift >= 0 ? "+" : "") + worstShift.toFixed(3) + " 秒";
+}
+
+function summarize(result, config, sourceClips, target) {
+    var lines = [];
+    lines.push("序列：" + app.project.activeSequence.name);
+    lines.push("源轨 A" + config.sourceTrack + "：" + sourceClips.length + " 条（前 " +
+        config.keepHead + " 首与最后 " + config.keepTail + " 首不动，中间 " +
+        result.movedCount + " 首重排）");
+    lines.push("目标轨 A" + config.targetTrack + "：" +
+        (target ? count(target.clips) + " 条（写入前会清空）" : "不存在"));
+    lines.push("采样栅格：" + result.grid.label + "（" + result.grid.ticks + " ticks）");
+    lines.push("统一间隙：" + BgmGapPlanner.seconds(result.gap).toFixed(6) + " 秒（" +
+        BgmGapPlanner.divSmall(result.gap, Number(result.grid.ticks)).q + " 个采样）");
+    lines.push("固定窗口：" + BgmGapPlanner.seconds(result.windowStart).toFixed(3) + " 秒 ～ " +
+        BgmGapPlanner.seconds(result.windowEnd).toFixed(3) + " 秒");
+    lines.push("最大位移：" + maxShiftText(result.entries));
+    lines.push("模式：" + config.mode);
+    return lines.join("\n");
+}
+
+function execute(config) {
+    var sequence = app.project && app.project.activeSequence;
+    var source, target, sourceClips, result, summary;
+
+    if (config.mode !== "report" && config.mode !== "write") {
+        throw new Error('CONFIG.mode 只能是 "report" 或 "write"，当前是 ' + config.mode + "。");
+    }
+    if (config.sourceTrack === config.targetTrack) {
+        throw new Error("源轨与目标轨不能是同一条。");
+    }
+    if (!sequence) {
+        throw new Error("请先在 Premiere 中打开一个序列。");
+    }
+    source = sequence.audioTracks[config.sourceTrack - 1];
+    if (!source) {
+        throw new Error("源音频轨 A" + config.sourceTrack + " 不存在。");
+    }
+    target = sequence.audioTracks[config.targetTrack - 1];
+
+    sourceClips = readTrack(source);
+    result = BgmGapPlanner.plan(sourceClips, config.keepHead, config.keepTail);
+    if (!result.ok) {
+        throw new Error(result.error);
+    }
+
+    report(result.entries);
+    summary = summarize(result, config, sourceClips, target);
+    $.writeln("\n" + summary);
+
+    if (config.mode === "report") {
+        alert(summary + "\n\n当前是 report 模式，未做任何修改。\n" +
+            '核对上面的间隙值与位移无误后，把 CONFIG.mode 改成 "write" 再跑一次。');
+        return;
+    }
+    throw new Error("write 模式尚未实现（Task 3 补齐）。");
+}
+
+function runRedistributeBgmGaps() {
+    var CONFIG = {
+        mode: "report",        // "report"：只试算并打印，不做任何修改；"write"：写入目标轨
+        keepHead: 6,           // 开头保持不动的首数
+        keepTail: 1,           // 结尾保持不动的首数
+        sourceTrack: 2,        // 源音频轨（1 起，对应 A2），只读
+        targetTrack: 3,        // 目标音频轨（1 起，对应 A3）
+        autoMuteSource: false  // 写入后是否自动静音源轨
+    };
+    try {
+        execute(CONFIG);
+    } catch (error) {
+        alert("BGM 间隙重排失败：\n" + error.message);
+    }
+}
+
+// 带 typeof app 守卫：在 Node 下求值整份文件时不会触发任何 Premiere 操作。
+if (typeof app !== "undefined" && app && app.project) {
+    runRedistributeBgmGaps();
+}
