@@ -7,7 +7,9 @@
 //   1. 在 Premiere Pro 中打开目标序列。
 //   2. 用 VS Code 的 ExtendScript 调试器运行本文件。
 //   3. 第一次保持 CONFIG.mode = "report"：只试算并打印，不做任何修改。
-//   4. 核对输出无误后改成 "write"，再跑一次；写入后会立即复读校验。
+//   4. 核对输出无误后把 CONFIG.mode 改成 "write"，再跑一次；写入后立即复读校验。
+//      放行闸门就是 mode 开关本身（必须手动改文件才能打开）—— 本脚本不弹确认窗，
+//      原因见下方 "关于放行闸门"。
 //
 // BgmGapPlanner 是不依赖 Premiere 的纯计算部分，可在 Node 下测试：
 //   node --test tests/
@@ -308,35 +310,10 @@ function attemptQuietly(label, action) {
     }
 }
 
-// 弹出确认对话框。
-// 不能用全局 confirm(message)：Premiere 25.5 实测会抛 "Not Enough Parameters"。
-// 因此优先用 ExtendScript 自带的 ScriptUI；两条路都走不通就中止 ——
-// 绝不在没有确认的情况下写入。
-function askConfirmation(title, message) {
-    var dialog;
-    try {
-        dialog = new Window("dialog", title);
-        dialog.add("statictext", undefined, message, { multiline: true });
-        dialog.add("statictext", undefined, " ");
-        dialog.add("button", undefined, "取消").onClick = function () {
-            dialog.close(0);
-        };
-        dialog.add("button", undefined, "确定，开始写入").onClick = function () {
-            dialog.close(1);
-        };
-        return dialog.show() === 1;
-    } catch (uiError) {
-        $.writeln("[警告] ScriptUI 对话框不可用：" + uiError.name + ": " + uiError.message);
-    }
-    try {
-        return confirm(message, title) === true;
-    } catch (confirmError) {
-        $.writeln("[警告] 全局 confirm(message, title) 也不可用：" + confirmError.name +
-            ": " + confirmError.message);
-    }
-    throw new Error("无法弹出确认对话框（ScriptUI 与全局 confirm 都不可用）。\n" +
-        "为避免在没有确认的情况下写入，已中止；源轨与目标轨都未做任何修改。");
-}
+// 关于放行闸门：
+// Premiere 25.5 的 ExtendScript 里没有可用的模态确认对话框 —— 全局 confirm 抛
+// "Not Enough Parameters"，ScriptUI 的 Window 也不存在（均在本机实测过），
+// 所以本脚本不弹窗，以 CONFIG.mode = "write" 这个必须手动改文件才能打开的开关作为闸门。
 
 function readTrack(track) {
     var clips = [], i, clip;
@@ -654,13 +631,8 @@ function execute(config) {
         throw new Error("目标音频轨 A" + config.targetTrack + " 不存在。\n" +
             "请先在 Premiere 中执行：序列 → 添加轨道 → 音频轨 1 条，然后重跑本脚本。");
     }
-    if (!attempt("弹出确认对话框", function () {
-            return askConfirmation("BGM 间隙重排 — 确认写入", summary + "\n\n" +
-                "即将写入目标轨 A" + config.targetTrack + "；源轨 A" +
-                config.sourceTrack + " 不会被修改。");
-        })) {
-        throw new Error("已取消，未做任何修改。");
-    }
+    $.writeln("===== WRITE 模式：即将写入目标轨 A" + config.targetTrack +
+        "，源轨 A" + config.sourceTrack + " 只读，不会改动 =====");
 
     if (count(target.clips) > 0) {
         cleared = count(target.clips);

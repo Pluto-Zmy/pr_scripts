@@ -13,6 +13,23 @@
 **Tech Stack:** Adobe Premiere Pro ExtendScript（ES3 语法）、Node.js 20（`node:test` + `node:vm`）、
 Markdown
 
+## 执行偏差记录（2026-09-22 实机运行后补记）
+
+1. **确认弹窗不可实现，已移除。** 原计划在 write 模式弹窗确认（Task 3 Step 1 里的 `confirm(...)`）。
+   实机（Premiere 25.5）测得：全局 `confirm(message)` 与 `confirm(message, title)` 均抛
+   `Not Enough Parameters`；ScriptUI 的 `Window` 在该版本不存在。放行闸门改为 `CONFIG.mode`
+   开关本身（必须手动改文件才能打开），write 模式打印 `===== WRITE 模式 =====` 横幅代替。
+2. **`setMute` 改数字参数。** 实测传布尔抛 `Illegal Parameter type`，改为 `setMute(1)`；
+   自动静音失败降级为警告，不再中断已经完成的写入。
+3. **新增 `attempt` / `attemptQuietly` 分步标签。** Premiere 的宿主错误不带位置信息，
+   靠标签才能定位是哪个接口炸的（本次定位 `confirm` 就是靠它）。同时修掉了
+   `preflight` / `writeTarget` 的 `finally` 里无条件恢复 in/out 的隐患：读取失败时
+   `oldIn.seconds` 会二次抛错、掩盖真正的错误。
+4. 其余接口由 `ProbeBgmApi.js` 在本机逐条实测可用：音频轨 `overwriteClip(item, ticks)`
+   两参数、`TrackItem.remove(0, 0)`、`ProjectItem.getInPoint/setInPoint(seconds, 2)`、
+   `TrackItem.inPoint/outPoint` 的 Time 对象、`clip.start.ticks` / `clip.end.ticks`。
+5. `ProbeBgmApi.js` 是诊断用临时脚本，未纳入提交。
+
 ## Global Constraints
 
 - 设计依据：`docs/superpowers/specs/2026-09-22-bgm-gap-redistribution-design.md`。
