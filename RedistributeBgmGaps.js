@@ -351,9 +351,178 @@ function summarize(result, config, sourceClips, target) {
     return lines.join("\n");
 }
 
+// 快照后再删除：不能一边遍历 Track.clips 一边 remove。
+function clearTrack(track) {
+    var clips = [], i;
+    for (i = 0; i < count(track.clips); i++) {
+        clips.push(track.clips[i]);
+    }
+    for (i = 0; i < clips.length; i++) {
+        clips[i].remove(0, 0);
+    }
+}
+
+// 在目标轨上找同素材、起点最接近的剪辑。找不到时返回 null，偏差由调用方判断。
+function findPlaced(track, item, startTicks) {
+    var best = null, bestDelta = null, i, clip, delta;
+    for (i = 0; i < count(track.clips); i++) {
+        clip = track.clips[i];
+        if (!clip.projectItem || String(clip.projectItem.nodeId) !== String(item.nodeId)) {
+            continue;
+        }
+        delta = Math.abs(Number(clip.start.ticks) - Number(startTicks));
+        if (bestDelta === null || delta < bestDelta) {
+            bestDelta = delta;
+            best = clip;
+        }
+    }
+    return best;
+}
+
+// 落位预检：在窗口末尾之后 60 秒放一条测试剪辑，确认 Premiere 严格按给定 tick 落位，
+// 然后立即删掉。这是写入前唯一能验证 overwriteClip 落位精度的办法。
+function preflight(target, result) {
+    var entry = null, i, item, oldIn, oldOut, probeTicks, clip = null, delta;
+    for (i = 0; i < result.entries.length && !entry; i++) {
+        if (result.entries[i].moved) {
+            entry = result.entries[i];
+        }
+    }
+    if (!entry) {
+        throw new Error("没有需要移动的剪辑，预检无从进行。");
+    }
+    item = entry.source.item;
+    if (!item) {
+        throw new Error("预检失败：第 " + entry.index + " 条没有素材引用。");
+    }
+    probeTicks = BgmGapPlanner.add(result.windowEnd, "15240960000000");   // 60 秒
+    oldIn = item.getInPoint(AUDIO_MEDIA_TYPE);
+    oldOut = item.getOutPoint(AUDIO_MEDIA_TYPE);
+    try {
+        item.setInPoint(entry.source.inSeconds, AUDIO_MEDIA_TYPE);
+        item.setOutPoint(entry.source.outSeconds, AUDIO_MEDIA_TYPE);
+        target.overwriteClip(item, probeTicks);
+        clip = findPlaced(target, item, probeTicks);
+        if (!clip) {
+            throw new Error("预检失败：目标轨上没有出现测试剪辑。");
+        }
+        delta = Math.abs(Number(clip.start.ticks) - Number(probeTicks));
+        if (delta > Number(result.grid.ticks) * 2) {
+            throw new Error("预检失败：请求落位 " + BgmGapPlanner.seconds(probeTicks).toFixed(3) +
+                " 秒，实际 " + BgmGapPlanner.seconds(ticksOf(clip.start.ticks)).toFixed(3) +
+                " 秒，偏差 " + delta + " ticks（超过 2 个采样）。\n" +
+                "说明 Premiere 不会严格按给定 tick 落位，需要先调整写入策略；本次未写入任何正式剪辑。");
+        }
+        return delta;
+    } finally {
+        if (clip) {
+            clip.remove(0, 0);
+        }
+        item.setInPoint(oldIn.seconds, AUDIO_MEDIA_TYPE);
+        item.setOutPoint(oldOut.seconds, AUDIO_MEDIA_TYPE);
+    }
+}
+
+function writeTarget(track, result) {
+    var i, entry, item, oldIn, oldOut, clip, delta;
+    for (i = 0; i < result.entries.length; i++) {
+        entry = result.entries[i];
+        item = entry.source.item;
+        if (!item) {
+            throw new Error("第 " + entry.index + " 条（" + entry.source.name +
+                "）没有素材引用。\n已写入 " + i +
+                " 条，请撤销本次操作（Ctrl+Z）或重跑本脚本。");
+        }
+        oldIn = item.getInPoint(AUDIO_MEDIA_TYPE);
+        oldOut = item.getOutPoint(AUDIO_MEDIA_TYPE);
+        try {
+            // 先按源剪辑的源 in/out 限定长度，避免覆盖掉刚放好的相邻剪辑。
+            item.setInPoint(entry.source.inSeconds, AUDIO_MEDIA_TYPE);
+            item.setOutPoint(entry.source.outSeconds, AUDIO_MEDIA_TYPE);
+            track.overwriteClip(item, entry.start);
+            clip = findPlaced(track, item, entry.start);
+            if (!clip) {
+                throw new Error("Premiere 没有在预期位置创建剪辑");
+            }
+            delta = Math.abs(Number(clip.start.ticks) - Number(entry.start));
+            if (delta > Number(result.grid.ticks) * 2) {
+                throw new Error("落位偏差 " + delta + " ticks，超过 2 个采样");
+            }
+            if (BgmGapPlanner.cmp(ticksOf(clip.end.ticks), entry.end) !== 0) {
+                clip.end = timeFromTicks(entry.end);
+                if (BgmGapPlanner.cmp(ticksOf(clip.end.ticks), entry.end) !== 0) {
+                    throw new Error("结束点未能校正到计划值");
+                }
+            }
+        } catch (error) {
+            throw new Error("第 " + entry.index + " 条（" + entry.source.name + "）写入失败：" +
+                error.message + "\n已写入 " + i +
+                " 条，请撤销本次操作（Ctrl+Z）或重跑本脚本。源轨未受影响。");
+        } finally {
+            // 无论成败都恢复素材原有 in/out。
+            item.setInPoint(oldIn.seconds, AUDIO_MEDIA_TYPE);
+            item.setOutPoint(oldOut.seconds, AUDIO_MEDIA_TYPE);
+        }
+        $.writeln(pad(entry.index, 4) + "  " + padRight(entry.source.name, 28) +
+            BgmGapPlanner.seconds(entry.start).toFixed(3) + " 秒");
+    }
+}
+
+function verifyTarget(track, result, config) {
+    var actual = readTrack(track), planned = result.entries;
+    var i, gap, deviation, maxDeviation = 0, finalGap, bound;
+    if (actual.length !== planned.length) {
+        throw new Error("复读校验失败：目标轨有 " + actual.length + " 条，计划 " +
+            planned.length + " 条。");
+    }
+    for (i = 0; i < actual.length; i++) {
+        if (BgmGapPlanner.cmp(actual[i].start, actual[i].end) >= 0) {
+            throw new Error("复读校验失败：目标轨第 " + (i + 1) + " 条时长为零或负。");
+        }
+        if (i && BgmGapPlanner.cmp(actual[i].start, actual[i - 1].end) < 0) {
+            throw new Error("复读校验失败：目标轨第 " + (i + 1) + " 条与前一条重叠。");
+        }
+        deviation = Math.abs(Number(actual[i].start) - Number(planned[i].start));
+        if (deviation > maxDeviation) {
+            maxDeviation = deviation;
+        }
+        if (i < config.keepHead || i === actual.length - 1) {
+            if (BgmGapPlanner.cmp(actual[i].start, planned[i].source.start) !== 0) {
+                throw new Error("复读校验失败：本该不动的第 " + (i + 1) + " 条位置变了（" +
+                    BgmGapPlanner.seconds(planned[i].source.start).toFixed(3) + " → " +
+                    BgmGapPlanner.seconds(actual[i].start).toFixed(3) + " 秒）。");
+            }
+        }
+    }
+    // 第 keepHead 首与最后一首之间：除最后一个间隙外全部等于 gap
+    for (i = config.keepHead; i <= actual.length - 1 - config.keepTail; i++) {
+        gap = BgmGapPlanner.sub(actual[i].start, actual[i - 1].end);
+        if (BgmGapPlanner.cmp(gap, result.gap) !== 0) {
+            throw new Error("复读校验失败：第 " + i + " 个间隙为 " +
+                BgmGapPlanner.seconds(gap).toFixed(6) + " 秒，应为 " +
+                BgmGapPlanner.seconds(result.gap).toFixed(6) + " 秒。");
+        }
+    }
+    // 最后一个间隙吸收取整余数
+    finalGap = BgmGapPlanner.sub(actual[actual.length - 1].start, actual[actual.length - 2].end);
+    bound = BgmGapPlanner.add(result.gap, BgmGapPlanner.mulSmall(result.grid.ticks, result.ngaps));
+    if (BgmGapPlanner.cmp(finalGap, result.gap) < 0 || BgmGapPlanner.cmp(finalGap, bound) > 0) {
+        throw new Error("复读校验失败：最后一个间隙为 " +
+            BgmGapPlanner.seconds(finalGap).toFixed(6) + " 秒，超出允许范围 [" +
+            BgmGapPlanner.seconds(result.gap).toFixed(6) + ", " +
+            BgmGapPlanner.seconds(bound).toFixed(6) + "] 秒。");
+    }
+    $.writeln("\n复读校验通过：");
+    $.writeln("  目标轨条数：" + actual.length);
+    $.writeln("  最后一个间隙比统一间隙多 " +
+        BgmGapPlanner.divSmall(BgmGapPlanner.sub(finalGap, result.gap),
+            Number(result.grid.ticks)).q + " 个采样");
+    $.writeln("  最大落位偏差：" + maxDeviation + " ticks");
+}
+
 function execute(config) {
     var sequence = app.project && app.project.activeSequence;
-    var source, target, sourceClips, result, summary;
+    var source, target, sourceClips, result, summary, cleared = 0;
 
     if (config.mode !== "report" && config.mode !== "write") {
         throw new Error('CONFIG.mode 只能是 "report" 或 "write"，当前是 ' + config.mode + "。");
@@ -385,7 +554,31 @@ function execute(config) {
             '核对上面的间隙值与位移无误后，把 CONFIG.mode 改成 "write" 再跑一次。');
         return;
     }
-    throw new Error("write 模式尚未实现（Task 3 补齐）。");
+    if (!target) {
+        throw new Error("目标音频轨 A" + config.targetTrack + " 不存在。\n" +
+            "请先在 Premiere 中执行：序列 → 添加轨道 → 音频轨 1 条，然后重跑本脚本。");
+    }
+    if (!confirm(summary + "\n\n即将写入目标轨 A" + config.targetTrack +
+            "；源轨 A" + config.sourceTrack + " 不会被修改。\n确认继续？")) {
+        throw new Error("已取消，未做任何修改。");
+    }
+
+    if (count(target.clips) > 0) {
+        cleared = count(target.clips);
+        clearTrack(target);
+        $.writeln("已清空目标轨：" + cleared + " 条");
+    }
+    $.writeln("落位预检：请求与实际的偏差 " + preflight(target, result) + " ticks");
+    writeTarget(target, result);
+    verifyTarget(target, result, config);
+    if (config.autoMuteSource) {
+        sequence.audioTracks[config.sourceTrack - 1].setMute(true);
+        $.writeln("已静音源轨 A" + config.sourceTrack);
+    }
+    alert("写入完成并校验通过。\n\n" + summary + "\n\n" +
+        "目标轨 A" + config.targetTrack + "：" + count(target.clips) + " 条" +
+        (cleared ? "（写入前清空 " + cleared + " 条）" : "") + "\n" +
+        "源轨 A" + config.sourceTrack + " 未做任何修改。");
 }
 
 function runRedistributeBgmGaps() {
