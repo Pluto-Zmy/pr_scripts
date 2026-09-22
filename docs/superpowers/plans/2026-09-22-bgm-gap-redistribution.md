@@ -111,7 +111,10 @@ test('十进制字符串大整数运算在真实 tick 量级精确', () => {
     assert.strictEqual(planner.sub('3505674583152000', '344420045676000'), '3161254537476000');
     assert.strictEqual(planner.cmp('344420045676000', '344420045676001'), -1);
     assert.strictEqual(planner.cmp('0', '0'), 0);
-    assert.deepStrictEqual(planner.divSmall('80194153846', 52), { q: '1542195266', r: 14 });
+    // 逐字段断言：vm 里造出的对象与测试不在同一 realm，deepStrictEqual 会比原型而误报。
+    const divided = planner.divSmall('80194153846', 52);
+    assert.strictEqual(divided.q, '1542195266');
+    assert.strictEqual(divided.r, 14);
     assert.strictEqual(planner.mulSmall('15153', 5292000), '80189676000');
 });
 
