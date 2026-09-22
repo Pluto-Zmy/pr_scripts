@@ -287,6 +287,57 @@ function padRight(value, width) {
     return text;
 }
 
+// 给宿主调用加标签：失败时抛出带步骤名的错误，便于定位到底是哪个接口炸的。
+// Premiere 的宿主错误（如 "No Enough Parameters"）本身不带位置，只有靠标签才能定位。
+function attempt(label, action) {
+    try {
+        return action();
+    } catch (error) {
+        throw new Error("[" + label + "] " + error.name + ": " + error.message);
+    }
+}
+
+// 收尾动作用：失败只打印不抛出，避免掩盖真正的错误。返回是否成功。
+function attemptQuietly(label, action) {
+    try {
+        action();
+        return true;
+    } catch (error) {
+        $.writeln("[警告] " + label + " 失败：" + error.name + ": " + error.message);
+        return false;
+    }
+}
+
+// 弹出确认对话框。
+// 不能用全局 confirm(message)：Premiere 25.5 实测会抛 "Not Enough Parameters"。
+// 因此优先用 ExtendScript 自带的 ScriptUI；两条路都走不通就中止 ——
+// 绝不在没有确认的情况下写入。
+function askConfirmation(title, message) {
+    var dialog;
+    try {
+        dialog = new Window("dialog", title);
+        dialog.add("statictext", undefined, message, { multiline: true });
+        dialog.add("statictext", undefined, " ");
+        dialog.add("button", undefined, "取消").onClick = function () {
+            dialog.close(0);
+        };
+        dialog.add("button", undefined, "确定，开始写入").onClick = function () {
+            dialog.close(1);
+        };
+        return dialog.show() === 1;
+    } catch (uiError) {
+        $.writeln("[警告] ScriptUI 对话框不可用：" + uiError.name + ": " + uiError.message);
+    }
+    try {
+        return confirm(message, title) === true;
+    } catch (confirmError) {
+        $.writeln("[警告] 全局 confirm(message, title) 也不可用：" + confirmError.name +
+            ": " + confirmError.message);
+    }
+    throw new Error("无法弹出确认对话框（ScriptUI 与全局 confirm 都不可用）。\n" +
+        "为避免在没有确认的情况下写入，已中止；源轨与目标轨都未做任何修改。");
+}
+
 function readTrack(track) {
     var clips = [], i, clip;
     for (i = 0; i < count(track.clips); i++) {
@@ -353,12 +404,15 @@ function summarize(result, config, sourceClips, target) {
 
 // 快照后再删除：不能一边遍历 Track.clips 一边 remove。
 function clearTrack(track) {
-    var clips = [], i;
+    var clips = [], current, i;
     for (i = 0; i < count(track.clips); i++) {
         clips.push(track.clips[i]);
     }
     for (i = 0; i < clips.length; i++) {
-        clips[i].remove(0, 0);
+        current = clips[i];
+        attempt("清空目标轨·删除第 " + (i + 1) + " 条", function () {
+            current.remove(0, 0);
+        });
     }
 }
 
@@ -396,13 +450,21 @@ function preflight(target, result) {
         throw new Error("预检失败：第 " + entry.index + " 条没有素材引用。");
     }
     probeTicks = BgmGapPlanner.add(result.windowEnd, "15240960000000");   // 60 秒
-    oldIn = item.getInPoint(AUDIO_MEDIA_TYPE);
-    oldOut = item.getOutPoint(AUDIO_MEDIA_TYPE);
+    $.writeln("预检参数：inSeconds=" + entry.source.inSeconds + " outSeconds=" +
+        entry.source.outSeconds + " probeTicks=" + probeTicks);
+    oldIn = attempt("预检·读素材 in 点", function () { return item.getInPoint(AUDIO_MEDIA_TYPE); });
+    oldOut = attempt("预检·读素材 out 点", function () { return item.getOutPoint(AUDIO_MEDIA_TYPE); });
     try {
-        item.setInPoint(entry.source.inSeconds, AUDIO_MEDIA_TYPE);
-        item.setOutPoint(entry.source.outSeconds, AUDIO_MEDIA_TYPE);
-        target.overwriteClip(item, probeTicks);
-        clip = findPlaced(target, item, probeTicks);
+        attempt("预检·设素材 in 点", function () {
+            item.setInPoint(entry.source.inSeconds, AUDIO_MEDIA_TYPE);
+        });
+        attempt("预检·设素材 out 点", function () {
+            item.setOutPoint(entry.source.outSeconds, AUDIO_MEDIA_TYPE);
+        });
+        attempt("预检·落位 overwriteClip(item, ticks)", function () {
+            target.overwriteClip(item, probeTicks);
+        });
+        clip = attempt("预检·查找测试剪辑", function () { return findPlaced(target, item, probeTicks); });
         if (!clip) {
             throw new Error("预检失败：目标轨上没有出现测试剪辑。");
         }
@@ -416,10 +478,18 @@ function preflight(target, result) {
         return delta;
     } finally {
         if (clip) {
-            clip.remove(0, 0);
+            attemptQuietly("预检·删除测试剪辑", function () { clip.remove(0, 0); });
         }
-        item.setInPoint(oldIn.seconds, AUDIO_MEDIA_TYPE);
-        item.setOutPoint(oldOut.seconds, AUDIO_MEDIA_TYPE);
+        if (oldIn) {
+            attemptQuietly("预检·恢复素材 in 点", function () {
+                item.setInPoint(oldIn.seconds, AUDIO_MEDIA_TYPE);
+            });
+        }
+        if (oldOut) {
+            attemptQuietly("预检·恢复素材 out 点", function () {
+                item.setOutPoint(oldOut.seconds, AUDIO_MEDIA_TYPE);
+            });
+        }
     }
 }
 
@@ -433,14 +503,30 @@ function writeTarget(track, result) {
                 "）没有素材引用。\n已写入 " + i +
                 " 条，请撤销本次操作（Ctrl+Z）或重跑本脚本。");
         }
-        oldIn = item.getInPoint(AUDIO_MEDIA_TYPE);
-        oldOut = item.getOutPoint(AUDIO_MEDIA_TYPE);
+        if (i === 0) {
+            $.writeln("写入参数（第 1 条）：inSeconds=" + entry.source.inSeconds +
+                " outSeconds=" + entry.source.outSeconds + " start=" + entry.start);
+        }
+        oldIn = attempt("写入·第 " + entry.index + " 条读素材 in 点", function () {
+            return item.getInPoint(AUDIO_MEDIA_TYPE);
+        });
+        oldOut = attempt("写入·第 " + entry.index + " 条读素材 out 点", function () {
+            return item.getOutPoint(AUDIO_MEDIA_TYPE);
+        });
         try {
             // 先按源剪辑的源 in/out 限定长度，避免覆盖掉刚放好的相邻剪辑。
-            item.setInPoint(entry.source.inSeconds, AUDIO_MEDIA_TYPE);
-            item.setOutPoint(entry.source.outSeconds, AUDIO_MEDIA_TYPE);
-            track.overwriteClip(item, entry.start);
-            clip = findPlaced(track, item, entry.start);
+            attempt("写入·第 " + entry.index + " 条设素材 in 点", function () {
+                item.setInPoint(entry.source.inSeconds, AUDIO_MEDIA_TYPE);
+            });
+            attempt("写入·第 " + entry.index + " 条设素材 out 点", function () {
+                item.setOutPoint(entry.source.outSeconds, AUDIO_MEDIA_TYPE);
+            });
+            attempt("写入·第 " + entry.index + " 条落位", function () {
+                track.overwriteClip(item, entry.start);
+            });
+            clip = attempt("写入·第 " + entry.index + " 条查找新剪辑", function () {
+                return findPlaced(track, item, entry.start);
+            });
             if (!clip) {
                 throw new Error("Premiere 没有在预期位置创建剪辑");
             }
@@ -449,7 +535,9 @@ function writeTarget(track, result) {
                 throw new Error("落位偏差 " + delta + " ticks，超过 2 个采样");
             }
             if (BgmGapPlanner.cmp(ticksOf(clip.end.ticks), entry.end) !== 0) {
-                clip.end = timeFromTicks(entry.end);
+                attempt("写入·第 " + entry.index + " 条校正结束点", function () {
+                    clip.end = timeFromTicks(entry.end);
+                });
                 if (BgmGapPlanner.cmp(ticksOf(clip.end.ticks), entry.end) !== 0) {
                     throw new Error("结束点未能校正到计划值");
                 }
@@ -460,8 +548,16 @@ function writeTarget(track, result) {
                 " 条，请撤销本次操作（Ctrl+Z）或重跑本脚本。源轨未受影响。");
         } finally {
             // 无论成败都恢复素材原有 in/out。
-            item.setInPoint(oldIn.seconds, AUDIO_MEDIA_TYPE);
-            item.setOutPoint(oldOut.seconds, AUDIO_MEDIA_TYPE);
+            if (oldIn) {
+                attemptQuietly("写入·恢复素材 in 点", function () {
+                    item.setInPoint(oldIn.seconds, AUDIO_MEDIA_TYPE);
+                });
+            }
+            if (oldOut) {
+                attemptQuietly("写入·恢复素材 out 点", function () {
+                    item.setOutPoint(oldOut.seconds, AUDIO_MEDIA_TYPE);
+                });
+            }
         }
         $.writeln(pad(entry.index, 4) + "  " + padRight(entry.source.name, 28) +
             BgmGapPlanner.seconds(entry.start).toFixed(3) + " 秒");
@@ -546,7 +642,7 @@ function execute(config) {
     }
 
     report(result.entries);
-    summary = summarize(result, config, sourceClips, target);
+    summary = attempt("生成摘要", function () { return summarize(result, config, sourceClips, target); });
     $.writeln("\n" + summary);
 
     if (config.mode === "report") {
@@ -558,32 +654,44 @@ function execute(config) {
         throw new Error("目标音频轨 A" + config.targetTrack + " 不存在。\n" +
             "请先在 Premiere 中执行：序列 → 添加轨道 → 音频轨 1 条，然后重跑本脚本。");
     }
-    if (!confirm(summary + "\n\n即将写入目标轨 A" + config.targetTrack +
-            "；源轨 A" + config.sourceTrack + " 不会被修改。\n确认继续？")) {
+    if (!attempt("弹出确认对话框", function () {
+            return askConfirmation("BGM 间隙重排 — 确认写入", summary + "\n\n" +
+                "即将写入目标轨 A" + config.targetTrack + "；源轨 A" +
+                config.sourceTrack + " 不会被修改。");
+        })) {
         throw new Error("已取消，未做任何修改。");
     }
 
     if (count(target.clips) > 0) {
         cleared = count(target.clips);
-        clearTrack(target);
+        attempt("清空目标轨", function () { clearTrack(target); });
         $.writeln("已清空目标轨：" + cleared + " 条");
     }
-    $.writeln("落位预检：请求与实际的偏差 " + preflight(target, result) + " ticks");
-    writeTarget(target, result);
-    verifyTarget(target, result, config);
+    $.writeln("落位预检：请求与实际的偏差 " +
+        attempt("落位预检", function () { return preflight(target, result); }) + " ticks");
+    attempt("写入目标轨", function () { writeTarget(target, result); });
+    attempt("复读校验", function () { verifyTarget(target, result, config); });
     if (config.autoMuteSource) {
-        sequence.audioTracks[config.sourceTrack - 1].setMute(true);
-        $.writeln("已静音源轨 A" + config.sourceTrack);
+        // setMute 要数字参数：传布尔会抛 "Illegal Parameter type"（已实测）。
+        if (attemptQuietly("自动静音源轨 A" + config.sourceTrack, function () {
+                sequence.audioTracks[config.sourceTrack - 1].setMute(1);
+            })) {
+            $.writeln("已静音源轨 A" + config.sourceTrack);
+        } else {
+            $.writeln("[警告] 自动静音失败，请手动静音 A" + config.sourceTrack + "。");
+        }
     }
     alert("写入完成并校验通过。\n\n" + summary + "\n\n" +
         "目标轨 A" + config.targetTrack + "：" + count(target.clips) + " 条" +
         (cleared ? "（写入前清空 " + cleared + " 条）" : "") + "\n" +
-        "源轨 A" + config.sourceTrack + " 未做任何修改。");
+        "源轨 A" + config.sourceTrack + " 未做任何修改。" +
+        (config.autoMuteSource ? "" : "\n\n提醒：A" + config.sourceTrack + " 与 A" +
+            config.targetTrack + " 现在会同时出声，需要手动静音其中一条。"));
 }
 
 function runRedistributeBgmGaps() {
     var CONFIG = {
-        mode: "report",        // "report"：只试算并打印，不做任何修改；"write"：写入目标轨
+        mode: "write",        // "report"：只试算并打印，不做任何修改；"write"：写入目标轨
         keepHead: 6,           // 开头保持不动的首数
         keepTail: 1,           // 结尾保持不动的首数
         sourceTrack: 2,        // 源音频轨（1 起，对应 A2），只读
