@@ -99,11 +99,10 @@ const clips = fixture.clips.map((clip, i) => ({
     item: null
 }));
 
-test('入口带 typeof app 守卫：Node 下求值整份文件不会触发 Premiere 操作', () => {
+test('Node 下求值整份文件不会触发 Premiere 操作', () => {
     const sandbox = {};
     vm.createContext(sandbox);
     vm.runInContext(fs.readFileSync(SCRIPT, 'utf8'), sandbox, { filename: SCRIPT });
-    assert.strictEqual(typeof sandbox.runRedistributeBgmGaps, 'function');
     assert.strictEqual(sandbox.BgmGapPlanner.seconds('254016000000'), 1);
 });
 
@@ -647,13 +646,26 @@ node --check RedistributeBgmGaps.js
 
 预期：无输出（语法通过）。
 
-- [ ] **Step 3: 回归测试**
+- [ ] **Step 3: 追加入口测试并跑回归**
+
+在 `tests/bgm_gap_planner.test.js` 末尾追加：
+
+```js
+test('入口函数存在，且 Node 下求值不触发它', () => {
+    const sandbox = {};
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(SCRIPT, 'utf8'), sandbox, { filename: SCRIPT });
+    assert.strictEqual(typeof sandbox.runRedistributeBgmGaps, 'function');
+});
+```
+
+然后运行：
 
 ```bash
 node --test tests/
 ```
 
-预期：Task 1 的 5 个测试仍然全部通过（入口守卫使整份文件在 Node 下可安全求值）。
+预期：6 个测试全部通过（Task 1 的 5 个 + 本步新增的 1 个）。
 
 - [ ] **Step 4: 静态确认源轨只读**
 
@@ -920,7 +932,7 @@ node --check RedistributeBgmGaps.js
 node --test tests/
 ```
 
-预期：5 个测试全部通过。
+预期：6 个测试全部通过。
 
 - [ ] **Step 5: 静态确认源轨只读**
 
