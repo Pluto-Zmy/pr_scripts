@@ -1,0 +1,42 @@
+音频 1 : 阿良良木健,洛天依Official - 绝体绝命.mp3 : 0
+音频 2 : 铁痕电台-MSR,SKa2or-洪炉.wav : 213.15
+音频 3 : 汪苏泷,G.E.M.邓紫棋-让你知道.wav : 647.266666666667
+音频 4 : 塞壬唱片-MSR,SKa2or-Theoretical Simulation.wav : 887.15
+音频 5 : Joanna Pacitti-Watch Me Shine.wav : 1038.25
+音频 6 : cleanmindsounds-Strategic Evolution.wav : 1233.98333333333
+音频 7 : 颜婷易兰-天上凉都.wav : 1355.58333333333
+音频 8 : Infraction Music-Windows.wav : 1594.23333333333
+音频 9 : Izzy Bizu-Faded.wav : 1757.86666666667
+音频 10 : 2-1 - Ed Sheeran-Shape of You.wav : 1968.6
+音频 11 : 2-2 - AURORA-Cure For Me.wav : 2202.3
+音频 12 : 2-3 - 周华健-风雨无阻.wav : 2401.15
+音频 13 : 2-4 - FELT-Dream in the Night.wav : 2674.48333333333
+音频 14 : 2-5 - Orangestar、IA - DAYBREAK FRONTLINE.mp3 : 3011.41666666667
+音频 15 : 2-6 - Kirara Magic-花月.wav : 3227.25
+音频 16 : 2-7 - 潘玮柏-亲爱的.wav : 3444.7
+音频 17 : 4-1 - 璟轩、醉雪、汐音社 - 不知.mp3 : 5714.08333333333
+音频 18 : 4-2 - EspiDev、L. Mity - Acrise.mp3 : 5956.86666666667
+音频 19 : 4-3 - 兰音Reine - 飞花入梦.mp3 : 6107.9
+音频 20 : 4-4 - 龟娘、银临 - 双契辞.mp3 : 6310.33333333333
+音频 21 : 4-5 CH17S - Shadows.wav : 6532.36666666667
+音频 22 : 4-6 - 逆时针向 - 云端循环.mp3 : 6755.05
+音频 23 : 4-7 - KBShinya、兰音Reine - 孑然记.mp3 : 6926.31666666667
+音频 24 : 4-8 - 椒椒JMJ - 由我执棋 (Checkmate).mp3 : 7150.8
+音频 25 : 4-9 三无Marblue - 别寒江.wav : 7348.93333333333
+音频 26 : [1]ODESZA - A Moment Apart.mp3 : 7576.08333333333
+音频 27 : [2]Tobu,Itro - Fantasy.mp3 : 7810.31666666667
+音频 28 : [3]TheFatRat - Windfall.mp3 : 7992
+音频 29 : [4]Thomas Bergersen - Rada.mp3 : 8220.36666666667
+音频 30 : [5]Marcus Warner - White Sails.mp3 : 8482.88333333333
+音频 31 : [6]Maksim Mrvica - Exodus.mp3 : 8705.88333333333
+音频 32 : [7]徐良,汪苏泷 - 后会无期.mp3 : 8895.93333333333
+音频 33 : [8]蔡国权 - 梦里可是谁.mp3 : 9102.11666666667
+音频 34 : [9]关菊英,关正杰 - 两忘烟水里.mp3 : 9341.75
+音频 35 : 6-1 凤凰传奇 - 兔侠功夫操.wav : 9534.91666666667
+音频 36 : 6-2 王麟 - 你是我的菜.wav : 9760.86666666667
+音频 37 : 6-3 澤野弘之 (さわの ひろゆき) _ naNami - Next 2 U -eUC-.wav : 9967.4
+音频 38 : 6-4 Boney M_ - Sunny.wav : 10211.7666666667
+音频 39 : 6-5 立花理香 (たちばな りか) - 花簪 HANAKANZASHI.wav : 10450.9666666667
+音频 40 : 6-6 宁采臣丶在唱歌 - 故剑情深.wav : 10754.2
+音频 41 : 6-7 Classical Artists - 婚礼进行曲 (Wedding March) (门德尔松版).wav : 10978.8
+音频 42 : 6-8 Fitz and The Tantrums - HandClap.wav : 11284.9333333333

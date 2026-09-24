@@ -1,0 +1,7 @@
+{
+  "name": "BGM Info Blocks",
+  "id": "bgm-info-blocks-local-dev",
+  "api": "1.0.0",
+  "main": "code.js",
+  "editorType": ["figma"]
+}
